@@ -12,6 +12,11 @@ remappings = [
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"
 ]
 
+fs_permissions = [
+    { access = "read", path = "./" },
+    { access = "write", path = "deployments/" }
+]
+
 # Test profile - optimize for size to avoid initcode limit warnings
 [profile.test]
 via_ir = true

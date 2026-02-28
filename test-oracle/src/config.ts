@@ -97,7 +97,7 @@ export const config = {
   rpcUrl: parseRpcUrls()[0],
   // All RPC URLs including fallbacks
   rpcUrls: parseRpcUrls(),
-  privateKey: process.env.PRIVATE_KEY as `0x${string}`,
+  privateKey: process.env.ORACLE_PK as `0x${string}`,
   moduleAddress: process.env.MODULE_ADDRESS as `0x${string}`,
   // Optional registry address for multi-module support
   registryAddress: process.env.REGISTRY_ADDRESS as `0x${string}` | undefined,
@@ -138,7 +138,7 @@ export const config = {
 // Validate required config
 export function validateConfig() {
   if (!config.privateKey) {
-    throw new Error('PRIVATE_KEY environment variable is required')
+    throw new Error('ORACLE_PK environment variable is required')
   }
   if (!config.moduleAddress) {
     throw new Error('MODULE_ADDRESS environment variable is required')

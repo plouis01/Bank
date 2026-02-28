@@ -25,7 +25,7 @@ function main() {
     console.error('Configuration error:', error)
     console.error('')
     console.error('Please copy .env.example to .env and configure:')
-    console.error('  - PRIVATE_KEY: Private key of the authorized updater')
+    console.error('  - ORACLE_PK: Private key of the authorized updater')
     console.error('  - MODULE_ADDRESS: DeFiInteractor contract address')
     console.error('  - RPC_URL: Ethereum RPC URL')
     process.exit(1)

@@ -25,15 +25,14 @@ import {TreasuryVault} from "../src/TreasuryVault.sol";
  *
  *      Required env vars:
  *        DEPLOYER_PRIVATE_KEY  - Deployer + initial owner key
- *        M2_SAFE_ADDRESS       - M2 Safe address (pre-deployed or mock)
+ *        M2_SAFE_ADDRESS       - M2 Safe address (authorization layer)
+ *        M1_SAFE_ADDRESS       - M1 Safe address (treasury — holds 90% of funds)
  *
  *      Optional env vars:
  *        ORACLE_ADDRESS        - Oracle EOA (defaults to deployer)
  *        CARD_EOA              - Card spending EOA (defaults to deployer)
  *        TRANSFER_EOA          - Transfer spending EOA (defaults to deployer)
  *        DEFI_EOA              - DeFi execution EOA (defaults to deployer)
- *        DEPLOY_M1             - Set to "true" to deploy M1 Treasury modules
- *        M1_SAFE_ADDRESS       - M1 Safe address (required if DEPLOY_M1=true)
  */
 contract DeployAll is Script {
     // Transfer types for SpendInteractor
@@ -65,6 +64,7 @@ contract DeployAll is Script {
         uint256 deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address deployer = vm.addr(deployerKey);
         address m2Safe = vm.envAddress("M2_SAFE_ADDRESS");
+        address m1Safe = vm.envAddress("M1_SAFE_ADDRESS");
         address oracle = vm.envOr("ORACLE_ADDRESS", deployer);
         address cardEOA = vm.envOr("CARD_EOA", deployer);
         address transferEOA = vm.envOr("TRANSFER_EOA", deployer);
@@ -72,7 +72,8 @@ contract DeployAll is Script {
 
         console.log("=== S4b Full Deployment ===");
         console.log("Deployer:", deployer);
-        console.log("M2 Safe:", m2Safe);
+        console.log("M1 Safe (treasury):", m1Safe);
+        console.log("M2 Safe (authorization):", m2Safe);
         console.log("Oracle:", oracle);
 
         vm.startBroadcast(deployerKey);
@@ -84,48 +85,47 @@ contract DeployAll is Script {
         _deployTokens();
         _deployPriceFeeds();
         _deployAaveVault();
-        _mintInitialSupply(deployer, m2Safe);
+        _mintInitialSupply(deployer, m1Safe);
 
         // ============ Phase 2: M2 Modules ============
         console.log("");
         console.log("--- Phase 2: M2 Modules ---");
 
-        // Deploy with deployer as owner (for configuration), then transfer to m2Safe
+        // SpendInteractor: authorization-only, avatar = M2 (emits events, no fund movement)
         spendInteractor = new SpendInteractor(m2Safe, deployer);
         console.log("SpendInteractor:", address(spendInteractor));
 
-        defiInteractor = new DeFiInteractor(m2Safe, deployer, oracle);
+        // DeFiInteractor: avatar = M1 (executes DeFi ops through M1 where funds live)
+        defiInteractor = new DeFiInteractor(m1Safe, deployer, oracle);
         console.log("DeFiInteractor:", address(defiInteractor));
 
+        // IntEOA: relay through M2
         intEOA = new IntEOA(m2Safe, deployer);
         console.log("IntEOA:", address(intEOA));
 
         aaveParser = new AaveV3Parser();
         console.log("AaveV3Parser:", address(aaveParser));
 
-        // ============ Phase 3: Configure M2 Modules ============
+        // ============ Phase 3: Configure Modules ============
         console.log("");
         console.log("--- Phase 3: Configuration ---");
 
         _configureSpendInteractor(cardEOA, transferEOA);
-        _configureDeFiInteractor(defiEOA);
+        _configureDeFiInteractor(defiEOA, oracle, m1Safe);
         _configureIntEOA(cardEOA, transferEOA, defiEOA);
 
-        // ============ Phase 4: M1 Treasury (Optional) ============
-        bool deployM1 = vm.envOr("DEPLOY_M1", false);
-        if (deployM1) {
-            console.log("");
-            console.log("--- Phase 4: M1 Treasury ---");
-            _deployM1Treasury();
-        }
+        // ============ Phase 4: M1 Treasury ============
+        console.log("");
+        console.log("--- Phase 4: M1 Treasury ---");
+        _deployM1Treasury(m1Safe);
 
         vm.stopBroadcast();
 
         // ============ Output Summary ============
-        _printSummary(deployer, m2Safe, oracle, cardEOA, transferEOA, defiEOA);
+        _printSummary(deployer, m1Safe, m2Safe, oracle, cardEOA, transferEOA, defiEOA);
 
         // Write JSON deployment file
-        _writeDeploymentJson();
+        _writeDeploymentJson(m1Safe, m2Safe);
     }
 
     // ============ Phase 1: Mock Infrastructure ============
@@ -170,38 +170,47 @@ contract DeployAll is Script {
         console.log("aDAI:", aDai);
     }
 
-    function _mintInitialSupply(address deployer, address m2Safe) internal {
+    function _mintInitialSupply(address deployer, address m1Safe) internal {
         // Mint to deployer for initial operations
         usdc.mint(deployer, 1_000_000e6);    // 1M USDC
         weth.mint(deployer, 1_000e18);        // 1000 WETH
         dai.mint(deployer, 1_000_000e18);     // 1M DAI
 
-        // Fund M2 Safe for DeFi operations
-        usdc.mint(m2Safe, 100_000e6);         // 100K USDC
-        weth.mint(m2Safe, 100e18);            // 100 WETH
-        dai.mint(m2Safe, 100_000e18);         // 100K DAI
+        // Fund M1 Treasury (90% of funds live here)
+        usdc.mint(m1Safe, 100_000e6);         // 100K USDC
+        weth.mint(m1Safe, 100e18);            // 100 WETH
+        dai.mint(m1Safe, 100_000e18);         // 100K DAI
 
-        console.log("Initial supply minted to deployer and M2 Safe");
+        console.log("Initial supply minted to deployer and M1 Treasury");
     }
 
     // ============ Phase 3: Configuration ============
 
     function _configureSpendInteractor(address cardEOA, address transferEOA) internal {
-        // Register card EOA: 500 EUR/day, payments only
-        uint8[] memory cardTypes = new uint8[](1);
-        cardTypes[0] = TYPE_PAYMENT;
-        spendInteractor.registerEOA(cardEOA, 500e18, cardTypes);
-        console.log("SpendInteractor: registered card EOA", cardEOA, "limit 500/day");
+        if (cardEOA == transferEOA) {
+            // Same address for both roles — register once with all types and higher limit
+            uint8[] memory allTypes = new uint8[](2);
+            allTypes[0] = TYPE_PAYMENT;
+            allTypes[1] = TYPE_TRANSFER;
+            spendInteractor.registerEOA(cardEOA, 5000e18, allTypes);
+            console.log("SpendInteractor: registered EOA (card+transfer)", cardEOA, "limit 5000/day");
+        } else {
+            // Register card EOA: 500 EUR/day, payments only
+            uint8[] memory cardTypes = new uint8[](1);
+            cardTypes[0] = TYPE_PAYMENT;
+            spendInteractor.registerEOA(cardEOA, 500e18, cardTypes);
+            console.log("SpendInteractor: registered card EOA", cardEOA, "limit 500/day");
 
-        // Register transfer EOA: 5000 EUR/day, payments + transfers
-        uint8[] memory transferTypes = new uint8[](2);
-        transferTypes[0] = TYPE_PAYMENT;
-        transferTypes[1] = TYPE_TRANSFER;
-        spendInteractor.registerEOA(transferEOA, 5000e18, transferTypes);
-        console.log("SpendInteractor: registered transfer EOA", transferEOA, "limit 5000/day");
+            // Register transfer EOA: 5000 EUR/day, payments + transfers
+            uint8[] memory transferTypes = new uint8[](2);
+            transferTypes[0] = TYPE_PAYMENT;
+            transferTypes[1] = TYPE_TRANSFER;
+            spendInteractor.registerEOA(transferEOA, 5000e18, transferTypes);
+            console.log("SpendInteractor: registered transfer EOA", transferEOA, "limit 5000/day");
+        }
     }
 
-    function _configureDeFiInteractor(address defiEOA) internal {
+    function _configureDeFiInteractor(address defiEOA, address oracle, address m2Safe) internal {
         // Set token price feeds
         address[] memory tokens = new address[](3);
         tokens[0] = address(usdc);
@@ -227,11 +236,8 @@ contract DeployAll is Script {
         console.log("DeFiInteractor: set price feeds for aUSDC, aWETH, aDAI");
 
         // Register Aave V3 selectors
-        // supply = DEPOSIT (costs spending, tracked for withdrawal)
         defiInteractor.registerSelector(SUPPLY_SELECTOR, DeFiInteractor.OperationType.DEPOSIT);
-        // withdraw = WITHDRAW (free, becomes acquired if matched)
         defiInteractor.registerSelector(WITHDRAW_SELECTOR, DeFiInteractor.OperationType.WITHDRAW);
-        // repay = WITHDRAW (free, reduces debt)
         defiInteractor.registerSelector(REPAY_SELECTOR, DeFiInteractor.OperationType.WITHDRAW);
         console.log("DeFiInteractor: registered Aave V3 selectors (supply/withdraw/repay)");
 
@@ -239,50 +245,52 @@ contract DeployAll is Script {
         defiInteractor.registerParser(address(aaveVault), address(aaveParser));
         console.log("DeFiInteractor: registered AaveV3Parser for MockAaveVault");
 
-        // Grant DEFI_EXECUTE_ROLE to defi EOA
-        defiInteractor.grantRole(defiEOA, 1); // DEFI_EXECUTE_ROLE
-        console.log("DeFiInteractor: granted DEFI_EXECUTE_ROLE to", defiEOA);
-
-        // Set sub-account limits: 5% max spending, 24h window
-        defiInteractor.setSubAccountLimits(defiEOA, 500, 1 days);
-        console.log("DeFiInteractor: set sub-account limits (5%, 24h)");
-
-        // Set allowed addresses for defi EOA
-        address[] memory allowedTargets = new address[](1);
-        allowedTargets[0] = address(aaveVault);
-        defiInteractor.setAllowedAddresses(defiEOA, allowedTargets, true);
-        console.log("DeFiInteractor: whitelisted MockAaveVault for defi EOA");
-
-        // Set initial oracle state
+        // Set initial oracle state (owner can always call these)
         defiInteractor.updateSafeValue(500_000e18); // $500K initial safe value
-        defiInteractor.updateSpendingAllowance(defiEOA, 25_000e18); // $25K = 5% of $500K
-        console.log("DeFiInteractor: set initial safe value ($500K) and spending allowance ($25K)");
+        console.log("DeFiInteractor: set initial safe value ($500K)");
+
+        // Sub-account configuration — skip if defiEOA conflicts with oracle/avatar/contract
+        bool canBeSubaccount = defiEOA != oracle
+            && defiEOA != m2Safe
+            && defiEOA != address(defiInteractor);
+
+        if (canBeSubaccount) {
+            defiInteractor.grantRole(defiEOA, 1); // DEFI_EXECUTE_ROLE
+            defiInteractor.setSubAccountLimits(defiEOA, 500, 1 days);
+            address[] memory allowedTargets = new address[](1);
+            allowedTargets[0] = address(aaveVault);
+            defiInteractor.setAllowedAddresses(defiEOA, allowedTargets, true);
+            defiInteractor.updateSpendingAllowance(defiEOA, 25_000e18);
+            console.log("DeFiInteractor: configured sub-account", defiEOA);
+        } else {
+            console.log("DeFiInteractor: skipped sub-account config (defiEOA == oracle/avatar). Set DEFI_EOA to a separate address for DeFi ops.");
+        }
     }
 
     function _configureIntEOA(address cardEOA, address transferEOA, address defiEOA) internal {
-        // Register EOAs
+        // Register unique EOAs (avoid duplicates)
         intEOA.registerEOA(cardEOA);
-        intEOA.registerEOA(transferEOA);
-        intEOA.registerEOA(defiEOA);
-        console.log("IntEOA: registered 3 EOAs");
+        if (transferEOA != cardEOA) intEOA.registerEOA(transferEOA);
+        if (defiEOA != cardEOA && defiEOA != transferEOA) intEOA.registerEOA(defiEOA);
+        console.log("IntEOA: registered EOAs");
 
         // Set allowed targets: card/transfer -> SpendInteractor, defi -> DeFiInteractor
         address[] memory spendTarget = new address[](1);
         spendTarget[0] = address(spendInteractor);
         intEOA.setAllowedTargets(cardEOA, spendTarget, true);
-        intEOA.setAllowedTargets(transferEOA, spendTarget, true);
+        if (transferEOA != cardEOA) {
+            intEOA.setAllowedTargets(transferEOA, spendTarget, true);
+        }
 
         address[] memory defiTarget = new address[](1);
         defiTarget[0] = address(defiInteractor);
         intEOA.setAllowedTargets(defiEOA, defiTarget, true);
-        console.log("IntEOA: set allowed targets (card/transfer->Spend, defi->DeFi)");
+        console.log("IntEOA: set allowed targets");
     }
 
-    // ============ Phase 4: M1 Treasury (Optional) ============
+    // ============ Phase 4: M1 Treasury ============
 
-    function _deployM1Treasury() internal {
-        address m1Safe = vm.envAddress("M1_SAFE_ADDRESS");
-
+    function _deployM1Treasury(address m1Safe) internal {
         TreasuryTimelock timelock = new TreasuryTimelock(
             m1Safe,
             m1Safe,
@@ -304,6 +312,7 @@ contract DeployAll is Script {
 
     function _printSummary(
         address deployer,
+        address m1Safe,
         address m2Safe,
         address oracle,
         address cardEOA,
@@ -317,7 +326,6 @@ contract DeployAll is Script {
         console.log("");
         console.log("# test-oracle/.env");
         console.log("MODULE_ADDRESS=", address(defiInteractor));
-        console.log("PRIVATE_KEY=<oracle-private-key>");
         console.log("TOKEN_USDC=", address(usdc));
         console.log("TOKEN_WETH=", address(weth));
         console.log("TOKEN_DAI=", address(dai));
@@ -333,7 +341,8 @@ contract DeployAll is Script {
         console.log("DEFI_INTERACTOR_ADDRESS=", address(defiInteractor));
         console.log("");
         console.log("# Key addresses");
-        console.log("M2_SAFE=", m2Safe);
+        console.log("M1_SAFE (treasury)=", m1Safe);
+        console.log("M2_SAFE (auth)=", m2Safe);
         console.log("DEPLOYER=", deployer);
         console.log("ORACLE=", oracle);
         console.log("CARD_EOA=", cardEOA);
@@ -344,20 +353,26 @@ contract DeployAll is Script {
         console.log("INT_EOA=", address(intEOA));
     }
 
-    function _writeDeploymentJson() internal {
-        string memory json = string.concat(
+    function _writeDeploymentJson(address m1Safe, address m2Safe) internal {
+        string memory part1 = string.concat(
             '{\n',
             '  "network": "monad-testnet",\n',
             '  "chainId": 10143,\n',
+            _jsonAddr("m1Safe", m1Safe), ',\n',
+            _jsonAddr("m2Safe", m2Safe), ',\n',
             _jsonAddr("usdc", address(usdc)), ',\n',
             _jsonAddr("weth", address(weth)), ',\n',
-            _jsonAddr("dai", address(dai)), ',\n',
+            _jsonAddr("dai", address(dai)), ',\n'
+        );
+        string memory part2 = string.concat(
             _jsonAddr("aUsdc", aaveVault.aTokens(address(usdc))), ',\n',
             _jsonAddr("aWeth", aaveVault.aTokens(address(weth))), ',\n',
             _jsonAddr("aDai", aaveVault.aTokens(address(dai))), ',\n',
             _jsonAddr("priceFeedUsdcUsd", address(usdcFeed)), ',\n',
             _jsonAddr("priceFeedEthUsd", address(ethFeed)), ',\n',
-            _jsonAddr("priceFeedDaiUsd", address(daiFeed)), ',\n',
+            _jsonAddr("priceFeedDaiUsd", address(daiFeed)), ',\n'
+        );
+        string memory part3 = string.concat(
             _jsonAddr("mockAaveVault", address(aaveVault)), ',\n',
             _jsonAddr("aaveV3Parser", address(aaveParser)), ',\n',
             _jsonAddr("spendInteractor", address(spendInteractor)), ',\n',
@@ -366,7 +381,7 @@ contract DeployAll is Script {
             '}'
         );
 
-        vm.writeFile("deployments/monad-testnet.json", json);
+        vm.writeFile("deployments/monad-testnet.json", string.concat(part1, part2, part3));
         console.log("");
         console.log("Deployment JSON written to deployments/monad-testnet.json");
     }
