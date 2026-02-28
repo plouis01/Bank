@@ -1,0 +1,17 @@
+{
+  "name": "s4b-indexer",
+  "version": "1.0.0",
+  "description": "Envio indexer for S4b SpendInteractor + DeFiInteractor events on Monad testnet",
+  "type": "module",
+  "scripts": {
+    "codegen": "envio codegen",
+    "dev": "envio dev",
+    "start": "envio start"
+  },
+  "dependencies": {
+    "envio": "^2.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

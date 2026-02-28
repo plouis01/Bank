@@ -1,0 +1,76 @@
+# S4b Envio Indexer Schema
+# Entities for all indexed events from SpendInteractor + DeFiInteractor
+
+type SpendAuthorized @entity {
+  id: ID!
+  m2: String! @index
+  eoa: String! @index
+  amount: BigInt!
+  recipientHash: String!
+  transferType: Int!
+  nonce: BigInt!
+  blockNumber: BigInt!
+  txHash: String!
+  logIndex: Int!
+  timestamp: BigInt!
+}
+
+type ProtocolExecution @entity {
+  id: ID!
+  subAccount: String! @index
+  target: String! @index
+  opType: Int!
+  tokensIn: [String!]!
+  amountsIn: [BigInt!]!
+  tokensOut: [String!]!
+  amountsOut: [BigInt!]!
+  spendingCost: BigInt!
+  blockNumber: BigInt!
+  txHash: String!
+  logIndex: Int!
+  timestamp: BigInt!
+}
+
+type TransferExecuted @entity {
+  id: ID!
+  subAccount: String! @index
+  token: String! @index
+  recipient: String! @index
+  amount: BigInt!
+  spendingCost: BigInt!
+  blockNumber: BigInt!
+  txHash: String!
+  logIndex: Int!
+  timestamp: BigInt!
+}
+
+type SafeValueUpdated @entity {
+  id: ID!
+  totalValueUSD: BigInt!
+  updateCount: BigInt!
+  blockNumber: BigInt!
+  txHash: String!
+  logIndex: Int!
+  timestamp: BigInt!
+}
+
+type SpendingAllowanceUpdated @entity {
+  id: ID!
+  subAccount: String! @index
+  newAllowance: BigInt!
+  blockNumber: BigInt!
+  txHash: String!
+  logIndex: Int!
+  timestamp: BigInt!
+}
+
+type AcquiredBalanceUpdated @entity {
+  id: ID!
+  subAccount: String! @index
+  token: String! @index
+  newBalance: BigInt!
+  blockNumber: BigInt!
+  txHash: String!
+  logIndex: Int!
+  timestamp: BigInt!
+}

@@ -1,0 +1,27 @@
+# Envio Indexer Configuration for S4b
+# Indexes SpendInteractor + DeFiInteractor events on Monad testnet
+
+name: s4b-indexer
+description: S4b on-chain authorization event indexer
+
+networks:
+  - id: 10143 # Monad testnet
+    start_block: 0
+    contracts:
+      - name: SpendInteractor
+        address:
+          - "{{SPEND_INTERACTOR_ADDRESS}}"
+        handler: src/EventHandlers.ts
+        events:
+          - event: SpendAuthorized(address indexed m2, address indexed eoa, uint256 amount, bytes32 recipientHash, uint8 transferType, uint256 nonce)
+
+      - name: DeFiInteractor
+        address:
+          - "{{DEFI_INTERACTOR_ADDRESS}}"
+        handler: src/EventHandlers.ts
+        events:
+          - event: ProtocolExecution(address indexed subAccount, address indexed target, uint8 opType, address[] tokensIn, uint256[] amountsIn, address[] tokensOut, uint256[] amountsOut, uint256 spendingCost)
+          - event: TransferExecuted(address indexed subAccount, address indexed token, address indexed recipient, uint256 amount, uint256 spendingCost)
+          - event: SafeValueUpdated(uint256 totalValueUSD, uint256 updateCount)
+          - event: SpendingAllowanceUpdated(address indexed subAccount, uint256 newAllowance)
+          - event: AcquiredBalanceUpdated(address indexed subAccount, address indexed token, uint256 newBalance)
