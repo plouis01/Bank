@@ -3,6 +3,7 @@
 
 type SpendAuthorized @entity {
   id: ID!
+  srcAddress: String! @index # The SpendInteractor contract that emitted this event
   m2: String! @index
   eoa: String! @index
   amount: BigInt!

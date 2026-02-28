@@ -15,6 +15,7 @@ import {
 SpendInteractor.SpendAuthorized.handler(async ({ event, context }) => {
   context.SpendAuthorized.set({
     id: `${event.transaction.hash}-${event.logIndex}`,
+    srcAddress: event.srcAddress,
     m2: event.params.m2,
     eoa: event.params.eoa,
     amount: event.params.amount,
