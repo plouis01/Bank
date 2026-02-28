@@ -17,7 +17,9 @@
     "viem": "^2.21.0",
     "node-cron": "^3.0.3",
     "dotenv": "^16.4.5",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "graphql": "^16.9.0",
+    "graphql-request": "^7.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

@@ -21,6 +21,8 @@ ignored_error_codes = [5740, 3860]
 
 [rpc_endpoints]
 sepolia = "${SEPOLIA_RPC_URL}"
+monad_testnet = "${MONAD_TESTNET_RPC_URL}"
 
 [etherscan]
 sepolia = { key = "${ETHERSCAN_API_KEY}" }
+monad_testnet = { key = "${MONAD_EXPLORER_API_KEY}", url = "${MONAD_EXPLORER_URL}" }

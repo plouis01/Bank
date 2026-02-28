@@ -24,7 +24,7 @@ import {
   type Address,
   type PublicClient,
 } from 'viem'
-import { sepolia } from 'viem/chains'
+import { monadTestnet } from './config.js'
 import dotenv from 'dotenv'
 
 dotenv.config()
@@ -363,9 +363,9 @@ interface TxData {
 
 // ============ Client Setup ============
 function getClient(): PublicClient {
-  const rpcUrl = process.env.RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com'
+  const rpcUrl = process.env.RPC_URL || 'https://testnet-rpc.monad.xyz'
   return createPublicClient({
-    chain: sepolia,
+    chain: monadTestnet,
     transport: http(rpcUrl),
   })
 }
@@ -691,7 +691,7 @@ function decodeContractError(errorData: Hex): { name: string; args?: Record<stri
 // ============ Tenderly Trace Fetching ============
 async function fetchTenderlyTrace(
   txHash: string,
-  chainId: number = 11155111 // Sepolia
+  chainId: number = 10143 // Monad testnet
 ): Promise<{ errorData?: Hex; error?: string } | null> {
   try {
     const response = await fetch(
@@ -730,7 +730,7 @@ async function simulateWithTrace(
 ): Promise<{ success: boolean; error?: string; errorData?: Hex; traceError?: string }> {
   // First try debug_traceCall if available
   try {
-    const rpcUrl = process.env.RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com'
+    const rpcUrl = process.env.RPC_URL || 'https://testnet-rpc.monad.xyz'
 
     const traceResponse = await fetch(rpcUrl, {
       method: 'POST',

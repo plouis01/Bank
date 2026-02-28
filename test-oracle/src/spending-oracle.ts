@@ -2,12 +2,13 @@
  * Local Spending Oracle
  *
  * Tracks spending and acquired balances for sub-accounts.
- * Uses RPC polling for event detection (replaces Chainlink CRE log triggers).
+ * Uses Envio GraphQL indexer for event detection on Monad testnet
+ * (replaces eth_getLogs which is limited to 100-1000 blocks on Monad).
  *
  * Features:
  * - Rolling 24h window tracking for spending
  * - Deposit/withdrawal matching for acquired status
- * - Event polling for real-time updates
+ * - Envio-based event querying for reliable indexing
  * - Cron-based periodic refresh
  */
 
@@ -25,6 +26,7 @@ import {
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import cron from 'node-cron'
+import { GraphQLClient, gql } from 'graphql-request'
 import { config, validateConfig, type TokenConfig } from './config.js'
 import { DeFiInteractorABI, OperationType, ChainlinkPriceFeedABI, ERC20ABI, ModuleRegistryABI } from './abi.js'
 
@@ -228,6 +230,64 @@ class RpcClientManager {
 
 // Initialize RPC client manager
 const rpcManager = new RpcClientManager(config.rpcUrls)
+
+// ============ Envio GraphQL Client ============
+
+const graphqlClient = new GraphQLClient(config.envioGraphqlUrl)
+
+const QUERY_PROTOCOL_EXECUTIONS = gql`
+  query ProtocolExecutions($sinceBlock: numeric!, $contractAddress: String) {
+    ProtocolExecution(
+      where: { blockNumber: { _gt: $sinceBlock } }
+      order_by: { blockNumber: asc, logIndex: asc }
+    ) {
+      id
+      subAccount
+      target
+      opType
+      tokensIn
+      amountsIn
+      tokensOut
+      amountsOut
+      spendingCost
+      blockNumber
+      txHash
+      logIndex
+      timestamp
+    }
+  }
+`
+
+const QUERY_TRANSFER_EXECUTIONS = gql`
+  query TransferExecutions($sinceBlock: numeric!) {
+    TransferExecuted(
+      where: { blockNumber: { _gt: $sinceBlock } }
+      order_by: { blockNumber: asc, logIndex: asc }
+    ) {
+      id
+      subAccount
+      token
+      recipient
+      amount
+      spendingCost
+      blockNumber
+      txHash
+      logIndex
+      timestamp
+    }
+  }
+`
+
+const QUERY_ACQUIRED_BALANCE_TOKENS = gql`
+  query AcquiredBalanceTokens($subAccount: String!) {
+    AcquiredBalanceUpdated(
+      where: { subAccount: { _eq: $subAccount } }
+      distinct_on: [token]
+    ) {
+      token
+    }
+  }
+`
 
 // Convenience getter for the current public client
 const getPublicClient = () => rpcManager.client
@@ -540,6 +600,43 @@ async function fetchBlockTimestamps(blockNumbers: bigint[]): Promise<Map<bigint,
 }
 
 async function queryProtocolExecutionEvents(moduleAddress: Address, fromBlock: bigint, toBlock: bigint, subAccount?: Address): Promise<ProtocolExecutionEvent[]> {
+  try {
+    // Query Envio indexer instead of eth_getLogs
+    const data = await graphqlClient.request<{
+      ProtocolExecution: Array<{
+        subAccount: string; target: string; opType: number
+        tokensIn: string[]; amountsIn: string[]
+        tokensOut: string[]; amountsOut: string[]
+        spendingCost: string; blockNumber: string
+        txHash: string; logIndex: number; timestamp: string
+      }>
+    }>(QUERY_PROTOCOL_EXECUTIONS, { sinceBlock: fromBlock.toString() })
+
+    const events: ProtocolExecutionEvent[] = data.ProtocolExecution
+      .filter(e => !subAccount || e.subAccount.toLowerCase() === subAccount.toLowerCase())
+      .map(e => ({
+        subAccount: e.subAccount as Address,
+        target: e.target as Address,
+        opType: e.opType as OperationType,
+        tokensIn: e.tokensIn as Address[],
+        amountsIn: e.amountsIn.map(a => BigInt(a)),
+        tokensOut: e.tokensOut as Address[],
+        amountsOut: e.amountsOut.map(a => BigInt(a)),
+        spendingCost: BigInt(e.spendingCost),
+        timestamp: BigInt(e.timestamp),
+        blockNumber: BigInt(e.blockNumber),
+        logIndex: e.logIndex,
+      }))
+
+    return events
+  } catch (error) {
+    log(`Envio query failed for ProtocolExecution, falling back to RPC: ${error}`)
+    return queryProtocolExecutionEventsRpc(moduleAddress, fromBlock, toBlock, subAccount)
+  }
+}
+
+/** RPC fallback for when Envio is unavailable */
+async function queryProtocolExecutionEventsRpc(moduleAddress: Address, fromBlock: bigint, toBlock: bigint, subAccount?: Address): Promise<ProtocolExecutionEvent[]> {
   const logs = await rpcManager.executeWithFallback(
     (client) => client.getLogs({
       address: moduleAddress,
@@ -548,7 +645,7 @@ async function queryProtocolExecutionEvents(moduleAddress: Address, fromBlock: b
       toBlock,
       args: subAccount ? { subAccount } : undefined,
     }),
-    'queryProtocolExecutionEvents'
+    'queryProtocolExecutionEventsRpc'
   )
 
   const events = logs.map(parseProtocolExecutionLog)
@@ -557,11 +654,9 @@ async function queryProtocolExecutionEvents(moduleAddress: Address, fromBlock: b
     return events
   }
 
-  // Fetch block timestamps for accurate window calculations
   const uniqueBlocks = [...new Set(events.map(e => e.blockNumber))]
   const blockTimestamps = await fetchBlockTimestamps(uniqueBlocks)
 
-  // Update event timestamps - all blocks must have timestamps at this point
   for (const event of events) {
     const timestamp = blockTimestamps.get(event.blockNumber)
     if (timestamp === undefined) {
@@ -574,6 +669,38 @@ async function queryProtocolExecutionEvents(moduleAddress: Address, fromBlock: b
 }
 
 async function queryTransferEvents(moduleAddress: Address, fromBlock: bigint, toBlock: bigint, subAccount?: Address): Promise<TransferExecutedEvent[]> {
+  try {
+    // Query Envio indexer instead of eth_getLogs
+    const data = await graphqlClient.request<{
+      TransferExecuted: Array<{
+        subAccount: string; token: string; recipient: string
+        amount: string; spendingCost: string; blockNumber: string
+        txHash: string; logIndex: number; timestamp: string
+      }>
+    }>(QUERY_TRANSFER_EXECUTIONS, { sinceBlock: fromBlock.toString() })
+
+    const events: TransferExecutedEvent[] = data.TransferExecuted
+      .filter(e => !subAccount || e.subAccount.toLowerCase() === subAccount.toLowerCase())
+      .map(e => ({
+        subAccount: e.subAccount as Address,
+        token: e.token as Address,
+        recipient: e.recipient as Address,
+        amount: BigInt(e.amount),
+        spendingCost: BigInt(e.spendingCost),
+        timestamp: BigInt(e.timestamp),
+        blockNumber: BigInt(e.blockNumber),
+        logIndex: e.logIndex,
+      }))
+
+    return events
+  } catch (error) {
+    log(`Envio query failed for TransferExecuted, falling back to RPC: ${error}`)
+    return queryTransferEventsRpc(moduleAddress, fromBlock, toBlock, subAccount)
+  }
+}
+
+/** RPC fallback for when Envio is unavailable */
+async function queryTransferEventsRpc(moduleAddress: Address, fromBlock: bigint, toBlock: bigint, subAccount?: Address): Promise<TransferExecutedEvent[]> {
   const logs = await rpcManager.executeWithFallback(
     (client) => client.getLogs({
       address: moduleAddress,
@@ -582,7 +709,7 @@ async function queryTransferEvents(moduleAddress: Address, fromBlock: bigint, to
       toBlock,
       args: subAccount ? { subAccount } : undefined,
     }),
-    'queryTransferEvents'
+    'queryTransferEventsRpc'
   )
 
   const events = logs.map(parseTransferExecutedLog)
@@ -591,11 +718,9 @@ async function queryTransferEvents(moduleAddress: Address, fromBlock: bigint, to
     return events
   }
 
-  // Fetch block timestamps for accurate window calculations
   const uniqueBlocks = [...new Set(events.map(e => e.blockNumber))]
   const blockTimestamps = await fetchBlockTimestamps(uniqueBlocks)
 
-  // Update event timestamps - all blocks must have timestamps at this point
   for (const event of events) {
     const timestamp = blockTimestamps.get(event.blockNumber)
     if (timestamp === undefined) {
@@ -610,34 +735,42 @@ async function queryTransferEvents(moduleAddress: Address, fromBlock: bigint, to
 /**
  * Query historical AcquiredBalanceUpdated events to find all tokens
  * that have ever had acquired balance set for a subaccount.
- * This is used to detect and clear stale on-chain balances.
- *
- * Uses pagination to handle large block ranges without hitting RPC limits.
- * Respects maxHistoricalBlocks to prevent unbounded growth as chain ages.
+ * Uses Envio indexer (single query, no pagination needed) with RPC fallback.
  */
 async function queryHistoricalAcquiredTokens(moduleAddress: Address, subAccount: Address): Promise<Set<Address>> {
   const tokens = new Set<Address>()
 
+  try {
+    // Envio: single query returns distinct tokens for this subaccount
+    const data = await graphqlClient.request<{
+      AcquiredBalanceUpdated: Array<{ token: string }>
+    }>(QUERY_ACQUIRED_BALANCE_TOKENS, { subAccount: subAccount.toLowerCase() })
+
+    for (const entry of data.AcquiredBalanceUpdated) {
+      tokens.add(entry.token.toLowerCase() as Address)
+    }
+
+    log(`Envio historical token query: ${tokens.size} unique tokens for ${subAccount}`)
+    return tokens
+  } catch (error) {
+    log(`Envio query failed for historical tokens, falling back to RPC: ${error}`)
+  }
+
+  // RPC fallback: paginated getLogs
   const currentBlock = await rpcManager.executeWithFallback(
     (client) => client.getBlockNumber(),
     'getBlockNumber'
   )
 
-  // Limit how far back we search to prevent unbounded growth
   const maxHistoricalBlocks = BigInt(config.maxHistoricalBlocks)
   const maxBlocksPerQuery = BigInt(config.maxBlocksPerQuery)
-
-  // Calculate the starting block (bounded by maxHistoricalBlocks)
   const earliestBlock = currentBlock > maxHistoricalBlocks
     ? currentBlock - maxHistoricalBlocks
     : 0n
 
-  log(`Querying historical tokens from block ${earliestBlock} to ${currentBlock} (${currentBlock - earliestBlock} blocks, max ${maxBlocksPerQuery} per query)`)
+  log(`RPC fallback: querying historical tokens from block ${earliestBlock} to ${currentBlock}`)
 
-  // Query in chunks to avoid RPC limits
   let fromBlock = earliestBlock
-  let totalLogs = 0
-  let queryCount = 0
 
   while (fromBlock < currentBlock) {
     const toBlock = fromBlock + maxBlocksPerQuery > currentBlock
@@ -653,7 +786,7 @@ async function queryHistoricalAcquiredTokens(moduleAddress: Address, subAccount:
           toBlock,
           args: { subAccount },
         }),
-        `queryHistoricalAcquiredTokens(${subAccount}) chunk ${queryCount}`
+        `queryHistoricalAcquiredTokens RPC fallback`
       )
 
       for (const logEntry of logs) {
@@ -662,58 +795,14 @@ async function queryHistoricalAcquiredTokens(moduleAddress: Address, subAccount:
           tokens.add(token.toLowerCase() as Address)
         }
       }
-
-      totalLogs += logs.length
-      queryCount++
-    } catch (error) {
-      // If a chunk fails, try with smaller range
-      log(`Query chunk failed (blocks ${fromBlock}-${toBlock}), trying smaller range: ${error}`)
-
-      const smallerChunkSize = maxBlocksPerQuery / 2n
-      if (smallerChunkSize >= 100n) {
-        // Retry with smaller chunks
-        let subFrom = fromBlock
-        while (subFrom < toBlock) {
-          const subTo = subFrom + smallerChunkSize > toBlock
-            ? toBlock
-            : subFrom + smallerChunkSize
-
-          try {
-            const logs = await rpcManager.executeWithFallback(
-              (client) => client.getLogs({
-                address: moduleAddress,
-                event: ACQUIRED_BALANCE_UPDATED_EVENT,
-                fromBlock: subFrom,
-                toBlock: subTo,
-                args: { subAccount },
-              }),
-              `queryHistoricalAcquiredTokens(${subAccount}) small chunk`
-            )
-
-            for (const logEntry of logs) {
-              const token = logEntry.args.token as Address
-              if (token) {
-                tokens.add(token.toLowerCase() as Address)
-              }
-            }
-
-            totalLogs += logs.length
-          } catch (subError) {
-            log(`Sub-chunk query failed (blocks ${subFrom}-${subTo}), skipping: ${subError}`)
-          }
-
-          subFrom = subTo + 1n
-        }
-      } else {
-        log(`Chunk too small to retry, skipping blocks ${fromBlock}-${toBlock}`)
-      }
+    } catch (chunkError) {
+      log(`RPC chunk failed (blocks ${fromBlock}-${toBlock}), skipping: ${chunkError}`)
     }
 
     fromBlock = toBlock + 1n
   }
 
-  log(`Historical token query complete: ${tokens.size} unique tokens found in ${totalLogs} events (${queryCount} queries)`)
-
+  log(`RPC historical token query: ${tokens.size} unique tokens for ${subAccount}`)
   return tokens
 }
 
