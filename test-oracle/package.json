@@ -1,0 +1,30 @@
+{
+  "name": "test-oracle",
+  "version": "1.0.0",
+  "description": "Local test oracle for S4b DeFiInteractor - runs without Chainlink CRE",
+  "type": "module",
+  "scripts": {
+    "start": "npx tsx src/index.ts",
+    "safe-value": "npx tsx src/safe-value.ts",
+    "spending-oracle": "npx tsx src/spending-oracle.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:fuzz": "npx tsx src/fuzz-test.ts",
+    "test:all": "vitest run && npx tsx src/fuzz-test.ts"
+  },
+  "dependencies": {
+    "viem": "^2.21.0",
+    "node-cron": "^3.0.3",
+    "dotenv": "^16.4.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/node-cron": "^3.0.11",
+    "@vitest/coverage-v8": "^4.0.15",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.0.15"
+  }
+}

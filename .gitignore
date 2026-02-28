@@ -1,0 +1,7 @@
+cache/
+out/
+.vscode
+lib/
+.env
+.claude
+CLAUDE.md

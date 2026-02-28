@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Coverage reports
+coverage/
+
+# Environment variables
+.env
+
+# Logs
+logs.txt
+*.log
+
+# Build outputs
+dist/
